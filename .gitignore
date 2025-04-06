@@ -1,0 +1,9 @@
+data
+models
+__pycache__
+wandb
+scratch*
+fnetuning
+*.ipynb
+train.py 
+visualize_weights.py
