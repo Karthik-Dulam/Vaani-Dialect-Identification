@@ -108,8 +108,8 @@ CONFIG = {
     "dataset": {
         "name": "ARTPARK-IISC/Vaani",
         "configs": andhra_pradesh_districts,
-        "revision": "33434cee57f8f96fd7c46641c9394310888d2f97",
-        # "revision": "0816973e005ca2377c8ffa65323c2bb866e24fbf",
+        # "revision": "33434cee57f8f96fd7c46641c9394310888d2f97",
+        "revision": "0816973e005ca2377c8ffa65323c2bb866e24fbf",
     },
     "model": {
         # "name": "facebook/mms-300m",
