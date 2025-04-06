@@ -187,7 +187,7 @@ def _load_vaani_dataset(config, cache_config):
             )
 
         def val_filter(r):
-            (r[cache_config["split_key"]] in val_spIDs) and (
+            return (r[cache_config["split_key"]] in val_spIDs) and (
                 r["language"] == cache_config["language"]
                 if cache_config["task_type"] == "dialect"
                 else True
