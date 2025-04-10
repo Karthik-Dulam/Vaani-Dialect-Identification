@@ -7,6 +7,7 @@ from transformers import (
     Wav2Vec2Processor,
     Wav2Vec2CTCTokenizer,
     Wav2Vec2FeatureExtractor,
+    WhisperProcessor,
 )
 from huggingface_hub import login
 import copy
@@ -54,48 +55,52 @@ def main():
 
     label_to_id = {label: i for i, label in enumerate(dialects)}
 
+    # Check if we're using a Whisper model
+    is_whisper = "whisper" in TRANSCRIPTION_CONFIG["model"]["name"].lower()
 
+    if is_whisper:
+        # Use Whisper processor
+        processor = WhisperProcessor.from_pretrained(TRANSCRIPTION_CONFIG["model"]["name"])
+        logger.info(f"Loaded Whisper processor from {TRANSCRIPTION_CONFIG['model']['name']}")
+    else:
+        # Use standard Wav2Vec2 processor with custom vocabulary
+        vocab_file = os.path.join(TRANSCRIPTION_CONFIG["output_dir"], "vocab.json")
+        with open(vocab_file, "w", encoding="utf-8") as f:
+            json.dump(
+                vocab_dict, f, ensure_ascii=False, indent=2
+            )
 
-    vocab_file = os.path.join(TRANSCRIPTION_CONFIG["output_dir"], "vocab.json")
-    with open(vocab_file, "w", encoding="utf-8") as f:
-        json.dump(
-            vocab_dict, f, ensure_ascii=False, indent=2
-        )  
-
-    tokenizer = Wav2Vec2CTCTokenizer(
-        vocab_file=vocab_file,
-        unk_token="[UNK]",
-        pad_token="[PAD]",
-        word_delimiter_token="|",
-        encoding="utf-8",
-    )
-
-    TRANSCRIPTION_CONFIG["model_config"]["vocab_size"] = len(tokenizer)
-    TRANSCRIPTION_CONFIG["model_config"]["pad_token_id"] = tokenizer.pad_token_id
-
-
-    added_tokens = [token for token in vocab_dict if token not in tokenizer.get_vocab()]
-    if added_tokens:
-        logger.warning(
-            f"The following tokens might not have been added correctly by loading the vocab file: {added_tokens}"
-        )
-        logger.warning(
-            "Consider using tokenizer.add_tokens() and model.resize_token_embeddings() if issues arise."
+        tokenizer = Wav2Vec2CTCTokenizer(
+            vocab_file=vocab_file,
+            unk_token="[UNK]",
+            pad_token="[PAD]",
+            word_delimiter_token="|",
+            encoding="utf-8",
         )
 
-    print(tokenizer.get_vocab())
+        TRANSCRIPTION_CONFIG["model_config"]["vocab_size"] = len(tokenizer)
+        TRANSCRIPTION_CONFIG["model_config"]["pad_token_id"] = tokenizer.pad_token_id
 
-    feature_extractor = Wav2Vec2FeatureExtractor(
-        feature_size=1,
-        sampling_rate=16000,
-        padding_value=0.0,
-        do_normalize=True,
-        return_attention_mask=True,
-    )
+        added_tokens = [token for token in vocab_dict if token not in tokenizer.get_vocab()]
+        if added_tokens:
+            logger.warning(
+                f"The following tokens might not have been added correctly by loading the vocab file: {added_tokens}"
+            )
+            logger.warning(
+                "Consider using tokenizer.add_tokens() and model.resize_token_embeddings() if issues arise."
+            )
 
-    processor = Wav2Vec2Processor(
-        feature_extractor=feature_extractor, tokenizer=tokenizer
-    )
+        feature_extractor = Wav2Vec2FeatureExtractor(
+            feature_size=1,
+            sampling_rate=16000,
+            padding_value=0.0,
+            do_normalize=True,
+            return_attention_mask=True,
+        )
+
+        processor = Wav2Vec2Processor(
+            feature_extractor=feature_extractor, tokenizer=tokenizer
+        )
 
     # Create datasets
     train_dataset = VaaniDataset(
@@ -297,42 +302,61 @@ def collate_fn(batch, processor):
     """
     Custom collate function that handles preprocessing and tokenization.
     """
-
     # Extract audio and transcripts from batch
     audio_samples = [item["audio"]["array"] for item in batch]
     transcripts = [item["transcript"] if item["transcript"] is not None else "" for item in batch]
     dialects = [item["dialect"] for item in batch]
-    sampling_rates = [item["audio"]["sampling_rate"] for item in batch]
-
-
-    # Process audio samples with the processor
-    processed_inputs = processor(
-        audio_samples,
-        sampling_rate=16_000,
-        padding="longest",
-        return_tensors="pt",
-        return_attention_mask=True,
-    )
-
-    # Process transcripts with the tokenizer
-    target_transcriptions = [f"<{dialect}> {transcript}".strip() for dialect, transcript in zip(dialects, transcripts)]
-    tokenizer_output = processor.tokenizer(
-        text=target_transcriptions,
-        padding="longest",
-        return_tensors="pt",
-    )
-
-    labels = tokenizer_output.input_ids
-
-    # Replace padding token id with -100 for loss calculation
-    # labels = torch.where(labels == processor.tokenizer.pad_token_id, -100, labels)
-
     
-    return {
-        "input_values": processed_inputs.input_values,
-        "attention_mask": processed_inputs.attention_mask,
-        "labels": labels
-    }
+    # Check if we're using a Whisper processor
+    is_whisper = isinstance(processor, WhisperProcessor)
+    
+    if is_whisper:
+        # Process audio samples for Whisper
+        processed_inputs = processor.feature_extractor(
+            audio_samples,
+            sampling_rate=16_000,
+            return_tensors="pt",
+        )
+        
+        # Process transcripts for Whisper
+        target_transcriptions = [f"<{dialect}> {transcript}".strip() for dialect, transcript in zip(dialects, transcripts)]
+        tokenizer_output = processor.tokenizer(
+            text=target_transcriptions,
+            return_tensors="pt",
+            padding="longest",
+        )
+        
+        labels = tokenizer_output.input_ids
+        
+        return {
+            "input_values": processed_inputs.input_features,
+            "labels": labels
+        }
+    else:
+        # Process audio samples with the Wav2Vec2 processor
+        processed_inputs = processor(
+            audio_samples,
+            sampling_rate=16_000,
+            padding="longest",
+            return_tensors="pt",
+            return_attention_mask=True,
+        )
+
+        # Process transcripts with the tokenizer
+        target_transcriptions = [f"<{dialect}> {transcript}".strip() for dialect, transcript in zip(dialects, transcripts)]
+        tokenizer_output = processor.tokenizer(
+            text=target_transcriptions,
+            padding="longest",
+            return_tensors="pt",
+        )
+
+        labels = tokenizer_output.input_ids
+        
+        return {
+            "input_values": processed_inputs.input_values,
+            "attention_mask": processed_inputs.attention_mask,
+            "labels": labels
+        }
 
 
 if __name__ == "__main__":

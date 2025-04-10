@@ -4,7 +4,7 @@ import pytorch_lightning as pl
 from sklearn.metrics import precision_score, recall_score, f1_score
 import logging
 import torch.nn.functional as F
-from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, WhisperForConditionalGeneration, WhisperProcessor
 from transformers.modeling_outputs import CausalLMOutput
 import jiwer
 import numpy as np
@@ -244,6 +244,32 @@ class Wav2Vec2ForASR(torch.nn.Module):
         return outputs
 
 
+class WhisperForASR(torch.nn.Module):
+    def __init__(self, model_name, model_config=None):
+        super().__init__()
+        
+        # Load the Whisper model
+        self.whisper = WhisperForConditionalGeneration.from_pretrained(model_name)
+        
+    def forward(self, input_values, labels=None, attention_mask=None):
+        # Handle the case where we have labels for training
+        if labels is not None:
+            outputs = self.whisper(
+                input_features=input_values,
+                decoder_input_ids=None,  # Let the model generate decoder inputs
+                labels=labels,
+                return_dict=True
+            )
+        else:
+            # For inference
+            outputs = self.whisper(
+                input_features=input_values,
+                return_dict=True
+            )
+            
+        return outputs
+
+
 class TranscriptionLitModel(pl.LightningModule):
     def __init__(
         self,
@@ -256,21 +282,39 @@ class TranscriptionLitModel(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(ignore=["processor"])
         self.processor = processor
-        vocab_size = len(processor.tokenizer.get_vocab())
-        self.model = Wav2Vec2ForASR(model_name, model_config, vocab_size)
+        
+        # Determine if using Whisper model
+        self.is_whisper = "whisper" in model_name.lower()
+        
+        if self.is_whisper:
+            self.model = WhisperForASR(model_name)
+            logger.info(f"Using Whisper model: {model_name}")
+        else:
+            vocab_size = len(processor.tokenizer.get_vocab())
+            self.model = Wav2Vec2ForASR(model_name, model_config, vocab_size)
+            logger.info(f"Using Wav2Vec2 model: {model_name}")
+            
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.training_step_outputs = []
         self.validation_step_outputs = []
         self.test_step_outputs = []
 
-        self.dialect_tokens = self._get_dialect_tokens_from_vocab()
-        logger.info(
-            f"Identified {len(self.dialect_tokens)} dialect tokens for extraction."
-        )
+        # Only extract dialect tokens if we're not using Whisper
+        if not self.is_whisper:
+            self.dialect_tokens = self._get_dialect_tokens_from_vocab()
+            logger.info(
+                f"Identified {len(self.dialect_tokens)} dialect tokens for extraction."
+            )
+        else:
+            self.dialect_tokens = []
 
     def _get_dialect_tokens_from_vocab(self):
         """Extracts potential dialect tokens (e.g., '<Dialect>') from the tokenizer's vocab."""
+        # Skip for Whisper models as they handle vocabulary differently
+        if self.is_whisper:
+            return []
+            
         vocab = self.processor.tokenizer.get_vocab()
         # Basic check: starts with '<', ends with '>', isn't a known special token
         special_tokens = ["<pad>", "<s>", "</s>", "<unk>", "|"]
@@ -287,7 +331,7 @@ class TranscriptionLitModel(pl.LightningModule):
 
     def forward(self, input_values, labels=None, attention_mask=None):
         return self.model(
-            input_values=input_values, labels=None, attention_mask=attention_mask
+            input_values=input_values, labels=labels, attention_mask=attention_mask
         )
 
     def training_step(self, batch, batch_idx):
@@ -313,19 +357,32 @@ class TranscriptionLitModel(pl.LightningModule):
             loss = outputs.loss
             self.log("val_loss", loss, prog_bar=True)
 
-            logits = outputs.logits
-            predicted_ids = torch.argmax(logits, dim=-1)
-
-            # Convert predictions to text
-            pred_strings = self.processor.batch_decode(predicted_ids)
-
-            # Convert labels to text - handle padding correctly
-            labels = batch["labels"].detach().cpu().numpy()
-            # Replace -100 (padding token) with pad_token_id
-            # labels = np.where(
-            #     labels != -100, labels, self.processor.tokenizer.pad_token_id
-            # )
-            label_strings = self.processor.batch_decode(labels)
+            # Generate predictions based on model type
+            if self.is_whisper:
+                # For Whisper, use generate method
+                generated_ids = self.model.whisper.generate(
+                    input_features=batch["input_values"],
+                    max_length=225  # Reasonable length for transcriptions
+                )
+                
+                # Decode the generated tokens
+                pred_strings = self.processor.batch_decode(
+                    generated_ids, skip_special_tokens=True
+                )
+                
+                # Decode reference labels
+                label_strings = self.processor.batch_decode(
+                    batch["labels"], skip_special_tokens=True
+                )
+            else:
+                # For Wav2Vec2, use argmax on logits
+                logits = outputs.logits
+                predicted_ids = torch.argmax(logits, dim=-1)
+                pred_strings = self.processor.batch_decode(predicted_ids)
+                
+                # Decode reference labels
+                labels = batch["labels"].detach().cpu().numpy()
+                label_strings = self.processor.batch_decode(labels)
 
             # Calculate WER
             wer = jiwer.wer(label_strings, pred_strings)

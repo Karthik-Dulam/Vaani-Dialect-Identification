@@ -139,12 +139,12 @@ CONFIG = {
     "training": {
         "learning_rate": 5e-5,
         "per_device_train_batch_size": 8,
-        "num_train_epochs": 6,
+        "num_train_epochs": 5,
         "weight_decay": 1e-4,
         "classifier_only": False,
-        "eval_steps": 500,
-        "save_steps": 500,
-        "logging_steps": 500,
+        "eval_steps": 10000,
+        "save_steps": 10000,
+        "logging_steps": 5000,
         "accumulate_grad_batches": 8,
     },
 }
@@ -174,16 +174,21 @@ TRANSCRIPTION_CONFIG = {
         "revision": None,
     },
     "model": {
-        "name": "facebook/wav2vec2-xls-r-300m",  # Good multilingual model
-        "feature_extractor": "facebook/wav2vec2-xls-r-300m",
-        "processor": "facebook/wav2vec2-xls-r-300m",
+        # "name": "facebook/wav2vec2-xls-r-300m",  # Good multilingual model
+        # "feature_extractor": "facebook/wav2vec2-xls-r-300m",
+        # "processor": "facebook/wav2vec2-xls-r-300m",
+
+        # whisper
+        "name": "vasista22/whisper-telugu-medium",
+        "feature_extractor": "vasista22/whisper-telugu-medium",
+        "processor": "vasista22/whisper-telugu-medium",
     },
     "model_config": {
-        "attention_dropout": 0.0,
-        "hidden_dropout": 0.0,
-        "feat_proj_dropout": 0.0,
-        "mask_time_prob": 0.0,
-        "layerdrop": 0.0,
+        "attention_dropout": 0.05,
+        "hidden_dropout": 0.05,
+        "feat_proj_dropout": 0.05,
+        "mask_time_prob": 0.05,
+        "layerdrop": 0.05,
         "ctc_loss_reduction": "mean",
         "ctc_zero_infinity": True,
     },
@@ -194,14 +199,14 @@ TRANSCRIPTION_CONFIG = {
         "prob_pitch": 0.0,
     },
     "training": {
-        "learning_rate": 5e-6,
+        "learning_rate": 1e-5,
         "per_device_train_batch_size": 16,
         "num_train_epochs": 20,
         "weight_decay": 1e-4,
         "classifier_only": False,
-        "eval_steps": 500,
-        "save_steps": 500,
-        "logging_steps": 100,
+        "eval_steps": 2000,
+        "save_steps": 2000,
+        "logging_steps": 2000,
         "accumulate_grad_batches": 1,
     },
 }
