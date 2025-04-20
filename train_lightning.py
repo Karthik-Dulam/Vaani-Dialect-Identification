@@ -1,30 +1,48 @@
 import os
 import time
-from config import get_config, set_seeds, logger, generate_output_dir, Config, CacheConfig
+from config import (
+    get_config,
+    set_seeds,
+    logger,
+    generate_output_dir,
+    Config,
+    CacheConfig,
+)
 import torch
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint 
+from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 from transformers import Wav2Vec2FeatureExtractor, AutoFeatureExtractor
 from huggingface_hub import login
 import copy
 import polars
 import wandb
-from dataclasses import asdict  # Added for dataclass serialization
+from dataclasses import asdict
 from typing import Dict, Any, List, Optional
+import argparse
 
 from models_vaani import LitModel
 from data import VaaniDataset, load_datasets
+from config import (
+    load_config,
+    update_config,
+    set_seeds,
+    logger,
+    generate_output_dir,
+    Config,
+    CacheConfig,
+)
 import json
 
 torch.set_float32_matmul_precision("high")
 
 
-def collate_fn(batch: List[Dict[str, Any]], feature_extractor: Any, config: Config) -> Dict[str, torch.Tensor]:
+def collate_fn(
+    batch: List[Dict[str, Any]], feature_extractor: Any, config: Config
+) -> Dict[str, torch.Tensor]:
     """
     Custom collate function that handles preprocessing and feature extraction for classification.
-    config: configuration dict containing model_config
     """
     audio_samples = [item["audio"]["array"] for item in batch]
     labels = [item["label"] for item in batch]
@@ -39,14 +57,31 @@ def collate_fn(batch: List[Dict[str, Any]], feature_extractor: Any, config: Conf
         return_attention_mask=True,
     )
     labels = torch.tensor(labels, dtype=torch.long)
-    input_vals = getattr(processed_inputs, "input_features", processed_inputs.input_values)
-    return {"input_values": input_vals, "attention_mask": processed_inputs.attention_mask, "label": labels}
+    input_vals = getattr(
+        processed_inputs, "input_features", processed_inputs.input_values
+    )
+    return {
+        "input_values": input_vals,
+        "attention_mask": processed_inputs.attention_mask,
+        "label": labels,
+    }
 
 
-def prepare_loader(raw_dataset: Any, feature_extractor: Any, label_to_id: Dict[str, int], config: Config, cache_config: CacheConfig, is_train: bool = False) -> DataLoader:
+def prepare_loader(
+    raw_dataset: Any,
+    feature_extractor: Any,
+    label_to_id: Dict[str, int],
+    config: Config,
+    cache_config: CacheConfig,
+    is_train: bool = False,
+) -> DataLoader:
     ds = VaaniDataset(
-        raw_dataset, feature_extractor, label_to_id,
-        is_train=is_train, config=config, cache_config=cache_config
+        raw_dataset,
+        feature_extractor,
+        label_to_id,
+        is_train=is_train,
+        config=config,
+        cache_config=cache_config,
     )
     return DataLoader(
         ds,
@@ -59,18 +94,14 @@ def prepare_loader(raw_dataset: Any, feature_extractor: Any, label_to_id: Dict[s
     )
 
 
-def run_experiment(config: Config, cache_config: CacheConfig, wandb_project: Optional[str] = None, run_name: Optional[str] = None) -> Dict[str, float]:
-    """
-    Run model training and evaluation given config and cache_config.
-    Optionally log to specified WandB project/run.
-    Returns evaluation metrics dict.
-    """
-    config = copy.deepcopy(config)
-    cache_config = copy.deepcopy(cache_config)
-
-    if config.output_dir is None:
-        config.output_dir = generate_output_dir(config, cache_config)
-    os.makedirs(config.output_dir, exist_ok=True)
+def run_experiment(
+    config: Config,
+    cache_config: CacheConfig,
+    devices: List[int],
+    wandb_project: Optional[str] = None,
+    run_name: Optional[str] = None,
+) -> Dict[str, float]:
+    config, cache_config = update_config(config, cache_config)
 
     set_seeds(cache_config.random_seed)
     login(config.hf_token)
@@ -78,14 +109,16 @@ def run_experiment(config: Config, cache_config: CacheConfig, wandb_project: Opt
 
     loggers = []
     api_key = os.environ.get("WANDB_KEY_K")
-    if (api_key):
+    if api_key:
         os.environ["WANDB_API_KEY"] = api_key
         wb_name = run_name or f"{config.model.name.split('/')[-1]}-{ts}"
         wb_prj = wandb_project or f"{config.name}-{cache_config.task_type}"
-        wb_logger = WandbLogger(project=wb_prj, name=wb_name, log_model=True, save_dir=config.output_dir)
+        wb_logger = WandbLogger(
+            project=wb_prj, name=wb_name, log_model=True, save_dir=config.output_dir
+        )
         wb_logger.log_hyperparams({**asdict(config), **asdict(cache_config)})
         loggers.append(wb_logger)
-    
+
     train_ds, test_ds, val_ds = load_datasets(config, cache_config)
 
     col = cache_config.task_type
@@ -101,10 +134,18 @@ def run_experiment(config: Config, cache_config: CacheConfig, wandb_project: Opt
     val_df = polars.Series(val_ds[col])
     test_df = polars.Series(test_ds[col])
 
-    for name, series in [("Training", train_df), ("Validation", val_df), ("Test", test_df)]:
+    for name, series in [
+        ("Training", train_df),
+        ("Validation", val_df),
+        ("Test", test_df),
+    ]:
         logger.info(f"{name} dataset distribution:\n{series.value_counts()}")
 
-    Extractor = AutoFeatureExtractor if config.model.name == "facebook/w2v-bert-2.0" else Wav2Vec2FeatureExtractor
+    Extractor = (
+        AutoFeatureExtractor
+        if config.model.name == "facebook/w2v-bert-2.0"
+        else Wav2Vec2FeatureExtractor
+    )
     feature_extractor = Extractor.from_pretrained(config.model.feature_extractor)
 
     logger.info(f"Loaded feature extractor: {config.model.feature_extractor}")
@@ -120,9 +161,15 @@ def run_experiment(config: Config, cache_config: CacheConfig, wandb_project: Opt
 
     logger.info(f"Loaded model: {config.model.name}")
 
-    train_loader = prepare_loader(train_ds, feature_extractor, label_to_id, config, cache_config, is_train=True)
-    val_loader   = prepare_loader(val_ds,   feature_extractor, label_to_id, config, cache_config)
-    test_loader  = prepare_loader(test_ds,  feature_extractor, label_to_id, config, cache_config)
+    train_loader = prepare_loader(
+        train_ds, feature_extractor, label_to_id, config, cache_config, is_train=True
+    )
+    val_loader = prepare_loader(
+        val_ds, feature_extractor, label_to_id, config, cache_config
+    )
+    test_loader = prepare_loader(
+        test_ds, feature_extractor, label_to_id, config, cache_config
+    )
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=config.output_dir,
@@ -150,7 +197,7 @@ def run_experiment(config: Config, cache_config: CacheConfig, wandb_project: Opt
     trainer = pl.Trainer(
         max_epochs=config.training.num_train_epochs,
         accelerator="auto",
-        devices=[3,6,7],
+        devices=devices,
         strategy="ddp_find_unused_parameters_true",
         logger=loggers,
         callbacks=[checkpoint_callback],
@@ -173,7 +220,6 @@ def run_experiment(config: Config, cache_config: CacheConfig, wandb_project: Opt
 
     logger.info("Training complete.")
 
-
     metrics = trainer.callback_metrics
     logger.info(f"Obtained metrics from training: {metrics}")
 
@@ -183,10 +229,27 @@ def run_experiment(config: Config, cache_config: CacheConfig, wandb_project: Opt
 
 
 def main() -> None:
-    config: Config
-    cache_config: CacheConfig
-    config, cache_config = get_config('classification')
-    run_experiment(config, cache_config)
+    parser = argparse.ArgumentParser(description="Train with PyTorch Lightning.")
+    parser.add_argument(
+        "--config_yaml",
+        type=str,
+        required=True,
+        help="Path to YAML config file for base updates.",
+    )
+    parser.add_argument(
+        "--devices",
+        type=str,
+        required=True,
+        help="Comma-separated list of device ids, e.g. '0,1,2'",
+    )
+    args = parser.parse_args()
+
+    devices = [int(d) for d in args.devices.split(",") if d.strip()]
+
+    config, cache_config = load_config("classification", yaml_path=args.config_yaml)
+    config, cache_config = update_config(config, cache_config)
+    run_experiment(config, cache_config, devices=devices)
+
 
 if __name__ == "__main__":
     main()

@@ -17,16 +17,35 @@ import wandb
 import json
 from torch.utils.data import DataLoader
 from dataclasses import asdict
+import argparse
 
 from models_vaani import TranscriptionLitModel
 from data import VaaniDataset, load_datasets
-from config import get_config, set_seeds, logger
+from config import load_config, update_config, set_seeds, logger
 
 torch.set_float32_matmul_precision("high")
 
-config, cache_config = get_config('transcription')
 
 def main():
+    parser = argparse.ArgumentParser(description="Train transcription model.")
+    parser.add_argument(
+        "--config_yaml",
+        type=str,
+        required=True,
+        help="Path to YAML config file for base updates.",
+    )
+    parser.add_argument(
+        "--devices",
+        type=str,
+        required=True,
+        help="Comma-separated list of device ids, e.g. '0,1,2'",
+    )
+    args = parser.parse_args()
+
+    devices = [int(d) for d in args.devices.split(",") if d.strip()]
+
+    config, cache_config = load_config("transcription", yaml_path=args.config_yaml)
+    config, cache_config = update_config(config, cache_config)
     set_seeds(cache_config.random_seed)
     login(config.hf_token)
 
@@ -43,8 +62,6 @@ def main():
         "Starting transcription training with configuration: %s",
         {**asdict(config), **asdict(cache_config)},
     )
-
-    os.makedirs(config.output_dir, exist_ok=True)
 
     train_ds, test_ds, val_ds, vocab_dict, dialects = load_datasets(
         config, cache_config
@@ -63,15 +80,11 @@ def main():
     logger.info(f"Added {len(dialect_tokens)} dialect tokens to Whisper tokenizer")
 
     if is_whisper:
-        whisper_processor = WhisperProcessor.from_pretrained(
-            config.model.name
-        )
+        whisper_processor = WhisperProcessor.from_pretrained(config.model.name)
         audio_processor = whisper_processor.feature_extractor
         whisper_processor.tokenizer = text_tokenizer
         processor_to_save = whisper_processor
-        logger.info(
-            f"Loaded Whisper feature extractor from {config.model.name}"
-        )
+        logger.info(f"Loaded Whisper feature extractor from {config.model.name}")
     else:
         audio_processor = Wav2Vec2FeatureExtractor(
             feature_size=1,
@@ -80,14 +93,17 @@ def main():
             do_normalize=True,
             return_attention_mask=True,
         )
-        processor_to_save = {"tokenizer": text_tokenizer, "feature_extractor": audio_processor}
+        processor_to_save = {
+            "tokenizer": text_tokenizer,
+            "feature_extractor": audio_processor,
+        }
         logger.info(f"Using Wav2Vec2 feature extractor with Whisper tokenizer")
 
-    setattr(config.model_config, 'vocab_size', len(text_tokenizer))
+    setattr(config.model_config, "vocab_size", len(text_tokenizer))
     if not is_whisper:
-        setattr(config.model_config, 'pad_token_id', text_tokenizer.pad_token_id)
-        setattr(config.model_config, 'bos_token_id', text_tokenizer.bos_token_id)
-        setattr(config.model_config, 'eos_token_id', text_tokenizer.eos_token_id)
+        setattr(config.model_config, "pad_token_id", text_tokenizer.pad_token_id)
+        setattr(config.model_config, "bos_token_id", text_tokenizer.bos_token_id)
+        setattr(config.model_config, "eos_token_id", text_tokenizer.eos_token_id)
 
     train_dataset = VaaniDataset(
         train_ds,
@@ -156,9 +172,7 @@ def main():
             log_model=True,
             save_dir=config.output_dir,
         )
-        wandb_logger.log_hyperparams(
-            {**asdict(config), **asdict(cache_config)}
-        )
+        wandb_logger.log_hyperparams({**asdict(config), **asdict(cache_config)})
         loggers.append(wandb_logger)
 
     checkpoint_wer_callback = ModelCheckpoint(
@@ -178,10 +192,6 @@ def main():
         monitor="val_dialect_acc",
         mode="max",
     )
-
-    # early_stopping_callback = EarlyStopping(
-    #     monitor="val_dialect_acc", patience=3, verbose=True, mode="max"
-    # )
 
     config_path = os.path.join(config.output_dir, "config.json")
     config_to_save = copy.deepcopy(config)
@@ -218,24 +228,23 @@ def main():
     trainer = pl.Trainer(
         max_epochs=config.training.num_train_epochs,
         accelerator="auto",
-        devices=[3, 6, 7],
+        devices=devices,
         strategy="ddp_find_unused_parameters_true",
         logger=loggers,
         callbacks=[
             checkpoint_wer_callback,
             checkpoint_dialect_callback,
-            # early_stopping_callback,
         ],
         precision="bf16-true",
         val_check_interval=config.training.val_check_interval,
         log_every_n_steps=config.training.logging_steps,
         gradient_clip_val=1.0,
-        # limit_train_batches=32,
-        # limit_val_batches=64
     )
 
     if config.resume:
-        ckpt_path = os.path.join(config.output_dir, f"best-dialect-checkpoint-{ts}.ckpt")
+        ckpt_path = os.path.join(
+            config.output_dir, f"best-dialect-checkpoint-{ts}.ckpt"
+        )
         if os.path.exists(ckpt_path):
             logger.info(f"Resuming training from checkpoint: {ckpt_path}")
         else:
@@ -270,7 +279,9 @@ def collate_fn(batch, processor):
     Expects processor to be either a WhisperProcessor or a dict with {'tokenizer', 'feature_extractor'}
     """
     audio_samples = [item["audio"]["array"] for item in batch]
-    transcripts = [item["transcript"] if item["transcript"] is not None else "" for item in batch]
+    transcripts = [
+        item["transcript"] if item["transcript"] is not None else "" for item in batch
+    ]
     dialects = [item["dialect"] for item in batch]
 
     is_whisper = isinstance(processor, WhisperProcessor)

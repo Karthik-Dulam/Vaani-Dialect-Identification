@@ -4,20 +4,31 @@ import pytorch_lightning as pl
 from sklearn.metrics import precision_score, recall_score, f1_score
 import logging
 import torch.nn.functional as F
-from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, WhisperForConditionalGeneration, WhisperProcessor
+from transformers import (
+    Wav2Vec2ForCTC,
+    Wav2Vec2Processor,
+    WhisperForConditionalGeneration,
+    WhisperProcessor,
+)
 from transformers.modeling_outputs import CausalLMOutput, SequenceClassifierOutput
 import jiwer
 import numpy as np
 import re
 from dataclasses import asdict, dataclass
 from typing import Dict, Any, List, Optional, Tuple, Union
-from config import ModelArchConfig 
+from config import ModelArchConfig
 
 logger = logging.getLogger(__name__)
 
 
 class Wav2Vec2Classifier(torch.nn.Module):
-    def __init__(self, num_labels: int, model_name: str, model_config: ModelArchConfig, classifier_only: bool = False):
+    def __init__(
+        self,
+        num_labels: int,
+        model_name: str,
+        model_config: ModelArchConfig,
+        classifier_only: bool = False,
+    ):
         super().__init__()
         self.num_labels = num_labels
         self.model_config: Dict[str, Any] = asdict(model_config)
@@ -86,7 +97,9 @@ class Wav2Vec2Classifier(torch.nn.Module):
 
         self.train()
 
-    def forward(self, input_values: torch.Tensor, labels: Optional[torch.Tensor] = None) -> SequenceClassifierOutput:
+    def forward(
+        self, input_values: torch.Tensor, labels: Optional[torch.Tensor] = None
+    ) -> SequenceClassifierOutput:
         outputs = self.wav2vec2(input_values)
         hidden_states = outputs.last_hidden_state
 
@@ -132,7 +145,9 @@ class LitModel(pl.LightningModule):
     def forward(self, input_values: torch.Tensor) -> SequenceClassifierOutput:
         return self.model(input_values=input_values)
 
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+    def training_step(
+        self, batch: Dict[str, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         outputs = self.model(input_values=batch["input_values"], labels=batch["label"])
         self.log("train_loss", outputs.loss, prog_bar=True)
         logits = outputs.logits
@@ -145,13 +160,17 @@ class LitModel(pl.LightningModule):
         )
         return outputs.loss
 
-    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
+    def validation_step(
+        self, batch: Dict[str, torch.Tensor], batch_idx: int
+    ) -> Dict[str, torch.Tensor]:
         outputs = self.model(input_values=batch["input_values"], labels=batch["label"])
         self.log("val_loss", outputs.loss, prog_bar=True)
         logits = outputs.logits
         predictions = torch.argmax(logits, dim=-1)
         self.log(
-            "val_acc", (predictions == batch["label"]).float().mean(), prog_bar=True, 
+            "val_acc",
+            (predictions == batch["label"]).float().mean(),
+            prog_bar=True,
         )
         self.validation_step_outputs.append(
             {"preds": predictions, "labels": batch["label"]}
@@ -162,7 +181,9 @@ class LitModel(pl.LightningModule):
             "labels": batch["label"],
         }
 
-    def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
+    def test_step(
+        self, batch: Dict[str, torch.Tensor], batch_idx: int
+    ) -> Dict[str, torch.Tensor]:
         outputs = self.model(input_values=batch["input_values"], labels=batch["label"])
         self.log("test_loss", outputs.loss, prog_bar=True)
         logits = outputs.logits
@@ -174,7 +195,9 @@ class LitModel(pl.LightningModule):
         self.test_step_outputs.append(output_dict)
         return output_dict
 
-    def _compute_metrics(self, outputs: List[Dict[str, torch.Tensor]], prefix: str) -> Tuple[np.ndarray, np.ndarray]:
+    def _compute_metrics(
+        self, outputs: List[Dict[str, torch.Tensor]], prefix: str
+    ) -> Tuple[np.ndarray, np.ndarray]:
         preds = torch.cat([x["preds"] for x in outputs]).cpu().numpy()
         labels = torch.cat([x["labels"] for x in outputs]).cpu().numpy()
 
@@ -223,10 +246,15 @@ class Wav2Vec2ForASR(torch.nn.Module):
                 del model_config_copy[key]
 
         self.wav2vec2 = Wav2Vec2ForCTC.from_pretrained(model_name, **model_config_copy)
-        
+
         logger.info(f"Resized Wav2Vec2 token embeddings to vocab_size: {vocab_size}")
 
-    def forward(self, input_values: torch.Tensor, labels: Optional[torch.Tensor] = None, attention_mask: Optional[torch.Tensor] = None) -> transformers.modeling_outputs.BaseModelOutput:
+    def forward(
+        self,
+        input_values: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> transformers.modeling_outputs.BaseModelOutput:
         if labels is not None and (labels == -100).all():
             labels = None
 
@@ -242,23 +270,27 @@ class Wav2Vec2ForASR(torch.nn.Module):
 class WhisperForASR(torch.nn.Module):
     def __init__(self, model_name: str, model_config: Optional[ModelArchConfig] = None):
         super().__init__()
-        
-        self.whisper: WhisperForConditionalGeneration = WhisperForConditionalGeneration.from_pretrained(model_name)
-        
-    def forward(self, input_values: torch.Tensor, labels: Optional[torch.Tensor] = None, attention_mask: Optional[torch.Tensor] = None) -> Union[CausalLMOutput, transformers.modeling_outputs.Seq2SeqLMOutput]:
+
+        self.whisper: WhisperForConditionalGeneration = (
+            WhisperForConditionalGeneration.from_pretrained(model_name)
+        )
+
+    def forward(
+        self,
+        input_values: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Union[CausalLMOutput, transformers.modeling_outputs.Seq2SeqLMOutput]:
         if labels is not None:
             outputs = self.whisper(
                 input_features=input_values,
-                decoder_input_ids=None,  
+                decoder_input_ids=None,
                 labels=labels,
-                return_dict=True
+                return_dict=True,
             )
         else:
-            outputs = self.whisper(
-                input_features=input_values,
-                return_dict=True
-            )
-            
+            outputs = self.whisper(input_features=input_values, return_dict=True)
+
         return outputs
 
 
@@ -266,17 +298,17 @@ class TranscriptionLitModel(pl.LightningModule):
     def __init__(
         self,
         model_name: str,
-        model_config: ModelArchConfig, 
-        processor: Union[Wav2Vec2Processor, WhisperProcessor], 
+        model_config: ModelArchConfig,
+        processor: Union[Wav2Vec2Processor, WhisperProcessor],
         learning_rate: float = 5e-5,
         weight_decay: float = 0.001,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["processor"])
         self.processor = processor
-        
+
         self.is_whisper = "whisper" in model_name.lower()
-        
+
         if self.is_whisper:
             self.model = WhisperForASR(model_name, model_config)
             logger.info(f"Using Whisper model: {model_name}")
@@ -285,12 +317,12 @@ class TranscriptionLitModel(pl.LightningModule):
             vocab_size = len(self.processor["tokenizer"].get_vocab())
             self.model = Wav2Vec2ForASR(model_name, model_config, vocab_size)
             logger.info(f"Using Wav2Vec2 model: {model_name}")
-            
+
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.training_step_outputs: List[Dict[str, torch.Tensor]] = []
-        self.validation_step_outputs: List[Dict[str, Any]] = [] 
-        self.test_step_outputs: List[Dict[str, Any]] = [] 
+        self.validation_step_outputs: List[Dict[str, Any]] = []
+        self.test_step_outputs: List[Dict[str, Any]] = []
 
         # Only extract dialect tokens if we're not using Whisper
         if not self.is_whisper:
@@ -306,7 +338,7 @@ class TranscriptionLitModel(pl.LightningModule):
         # Skip for Whisper models as they handle vocabulary differently
         if self.is_whisper:
             return []
-            
+
         vocab = self.processor["tokenizer"].get_vocab()
         # Basic check: starts with '<', ends with '>', isn't a known special token
         special_tokens = ["<pad>", "<s>", "</s>", "<unk>", "|"]
@@ -320,12 +352,19 @@ class TranscriptionLitModel(pl.LightningModule):
         dialect_tokens.sort(key=len, reverse=True)
         return dialect_tokens
 
-    def forward(self, input_values: torch.Tensor, labels: Optional[torch.Tensor] = None, attention_mask: Optional[torch.Tensor] = None) -> Any: 
+    def forward(
+        self,
+        input_values: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Any:
         return self.model(
             input_values=input_values, labels=labels, attention_mask=attention_mask
         )
 
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+    def training_step(
+        self, batch: Dict[str, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         outputs = self.model(
             input_values=batch["input_values"],
             attention_mask=batch.get("attention_mask", None),
@@ -337,7 +376,9 @@ class TranscriptionLitModel(pl.LightningModule):
         self.training_step_outputs.append({"loss": loss})
         return loss
 
-    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, Any]:
+    def validation_step(
+        self, batch: Dict[str, torch.Tensor], batch_idx: int
+    ) -> Dict[str, Any]:
         with torch.no_grad():
             outputs = self.model(
                 input_values=batch["input_values"],
@@ -350,16 +391,13 @@ class TranscriptionLitModel(pl.LightningModule):
 
             if self.is_whisper:
                 generated_ids = self.model.whisper.generate(
-                    input_features=batch["input_values"],
-                    max_length=225  
+                    input_features=batch["input_values"], max_length=225
                 )
-                
-                
+
                 pred_strings = self.processor.batch_decode(
                     generated_ids, skip_special_tokens=True
                 )
-                
-                
+
                 label_strings = self.processor.batch_decode(
                     batch["labels"], skip_special_tokens=True
                 )
@@ -367,9 +405,11 @@ class TranscriptionLitModel(pl.LightningModule):
                 logits = outputs.logits
                 predicted_ids = torch.argmax(logits, dim=-1)
                 pred_strings = self.processor["tokenizer"].batch_decode(predicted_ids)
-                
+
                 labels = batch["labels"].detach().cpu().numpy()
-                labels = np.where(labels != -100, labels, self.processor["tokenizer"].pad_token_id)
+                labels = np.where(
+                    labels != -100, labels, self.processor["tokenizer"].pad_token_id
+                )
                 label_strings = self.processor["tokenizer"].batch_decode(labels)
 
             wer = jiwer.wer(label_strings, pred_strings)
@@ -414,7 +454,9 @@ class TranscriptionLitModel(pl.LightningModule):
         match = re.search(r"<([^>]+)>", text)
         return match.group(1) if match else None
 
-    def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, Any]:
+    def test_step(
+        self, batch: Dict[str, torch.Tensor], batch_idx: int
+    ) -> Dict[str, Any]:
         return self.validation_step(batch, batch_idx)
 
     def on_train_epoch_end(self) -> None:

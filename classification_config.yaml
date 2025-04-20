@@ -1,0 +1,32 @@
+\
+# Sample YAML configuration for classification task updates
+# Only include fields you want to override from the defaults in config.py
+
+# Example: Override default tuning ranges
+# tuning:
+#   learning_rate_min: 5e-6
+#   learning_rate_max: 5e-5
+#   weight_decay_min: 1e-4
+#   weight_decay_max: 1e-3
+#   dropout_min: 0.1
+#   dropout_max: 0.3
+
+# Example: Override a specific training parameter
+# training:
+#   num_train_epochs: 10
+
+# Example: Override model name
+# model:
+#   name: "facebook/wav2vec2-large-xlsr-53"
+#   processor: "facebook/wav2vec2-large-xlsr-53"
+#   feature_extractor: "facebook/wav2vec2-large-xlsr-53"
+
+# Example: Override CacheConfig parameters
+# cache_config_updates:
+#   num_proc: 8
+#   min_seconds: 3
+#   language: "English" # Example change
+
+# By default, this file is empty, meaning it uses all defaults from config.py
+# Add specific overrides below as needed.
+

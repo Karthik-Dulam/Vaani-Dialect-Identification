@@ -1,0 +1,33 @@
+\
+# Sample YAML configuration for transcription task updates
+# Only include fields you want to override from the defaults in config.py
+
+# Example: Override default tuning ranges (if you plan to tune transcription)
+# tuning:
+#   learning_rate_min: 5e-6
+#   learning_rate_max: 5e-5
+#   weight_decay_min: 1e-4
+#   weight_decay_max: 1e-3
+#   dropout_min: 0.05 # Transcription might need different dropout ranges
+#   dropout_max: 0.25
+
+# Example: Override a specific training parameter
+# training:
+#   learning_rate: 5e-6
+#   num_train_epochs: 8
+
+# Example: Override model name or tokenizer
+# model:
+#   name: "openai/whisper-small"
+#   processor: "openai/whisper-small" # Whisper uses a combined processor
+#   feature_extractor: "openai/whisper-small"
+#   tokenizer: "openai/whisper-small"
+
+# Example: Override CacheConfig parameters
+# cache_config_updates:
+#   num_proc: 12
+#   min_seconds: 1 # Example change
+
+# By default, this file is empty, meaning it uses all defaults from config.py
+# Add specific overrides below as needed.
+

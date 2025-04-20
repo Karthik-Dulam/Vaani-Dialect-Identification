@@ -19,72 +19,83 @@ from config import get_config, set_seeds, logger, Config, CacheConfig
 from models_vaani import LitModel
 from data import VaaniDataset, load_datasets
 
-def plot_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, labels: List[str], output_dir: str) -> None:
+
+def plot_confusion_matrix(
+    y_true: np.ndarray, y_pred: np.ndarray, labels: List[str], output_dir: str
+) -> None:
     """Plot and save confusion matrix."""
     logger.info(f"Shape of y_true: {y_true.shape}")
     logger.info(f"Shape of y_pred: {y_pred.shape}")
     logger.info(f"Number of unique true labels: {len(np.unique(y_true))}")
     logger.info(f"Number of unique predicted labels: {len(np.unique(y_pred))}")
     logger.info(f"Labels provided: {labels}")
-    
+
     if len(y_true) == 0 or len(y_pred) == 0:
         logger.error("Empty arrays provided to confusion matrix")
         return
-        
+
     cm = confusion_matrix(y_true, y_pred)
     logger.info(f"Confusion matrix shape: {cm.shape}")
     plt.figure(figsize=(12, 10))
-    sns.heatmap(
-        cm, 
-        annot=True, 
-        fmt='d', 
-        xticklabels=labels,
-        yticklabels=labels
-    )
-    plt.title('Confusion Matrix')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
+    sns.heatmap(cm, annot=True, fmt="d", xticklabels=labels, yticklabels=labels)
+    plt.title("Confusion Matrix")
+    plt.ylabel("True Label")
+    plt.xlabel("Predicted Label")
     plt.xticks(rotation=45)
     plt.yticks(rotation=45)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'))
+    plt.savefig(os.path.join(output_dir, "confusion_matrix.png"))
     plt.close()
 
-def analyze_errors(dataset: dts.Dataset, predictions: np.ndarray, true_labels: np.ndarray, label_mapping: Dict[int, str], output_dir: str, cache_config: CacheConfig) -> pl.DataFrame:
+
+def analyze_errors(
+    dataset: dts.Dataset,
+    predictions: np.ndarray,
+    true_labels: np.ndarray,
+    label_mapping: Dict[int, str],
+    output_dir: str,
+    cache_config: CacheConfig,
+) -> pl.DataFrame:
     """Analyze misclassified examples."""
     errors = []
-    split_key = cache_config.split_key 
+    split_key = cache_config.split_key
     for idx, (pred, true) in enumerate(zip(predictions, true_labels)):
         if pred != true:
-            errors.append({
-                'Index': idx,
-                'True_Label': label_mapping[true],
-                'Predicted_Label': label_mapping[pred],
-                split_key: dataset[idx][split_key],
-            })
-    
-    
+            errors.append(
+                {
+                    "Index": idx,
+                    "True_Label": label_mapping[true],
+                    "Predicted_Label": label_mapping[pred],
+                    split_key: dataset[idx][split_key],
+                }
+            )
+
     if errors:
         error_df = pl.DataFrame(errors)
-        error_df.write_parquet(os.path.join(output_dir, 'error_analysis.parquet'))
+        error_df.write_parquet(os.path.join(output_dir, "error_analysis.parquet"))
     else:
         logger.info("No errors found in the evaluation set")
-        error_df = pl.DataFrame(schema={
-            'Index': pl.Int64,
-            'True_Label': pl.Utf8,
-            'Predicted_Label': pl.Utf8,
-            split_key: pl.Utf8
-        })
-    
+        error_df = pl.DataFrame(
+            schema={
+                "Index": pl.Int64,
+                "True_Label": pl.Utf8,
+                "Predicted_Label": pl.Utf8,
+                split_key: pl.Utf8,
+            }
+        )
+
     return error_df
 
-def collate_fn(batch: List[Dict[str, Any]], feature_extractor: Any, config: Config) -> Dict[str, torch.Tensor]:
+
+def collate_fn(
+    batch: List[Dict[str, Any]], feature_extractor: Any, config: Config
+) -> Dict[str, torch.Tensor]:
     """
     Custom collate function that handles preprocessing and feature extraction for classification.
     """
     audio_samples = [item["audio"]["array"] for item in batch]
     labels = [item["label"] for item in batch]
-    max_length = 16000 * config.model_config.num_seconds 
+    max_length = 16000 * config.model_config.num_seconds
     processed_inputs = feature_extractor(
         audio_samples,
         sampling_rate=16000,
@@ -108,8 +119,9 @@ def collate_fn(batch: List[Dict[str, Any]], feature_extractor: Any, config: Conf
             "label": labels,
         }
 
+
 def evaluate_model(checkpoint_path: str) -> Dict[str, float]:
-    config, cache_config = get_config('classification')
+    config, cache_config = get_config("classification")
     set_seeds(cache_config.random_seed)
     login(config.hf_token)
     logger.info("Starting model evaluation")
@@ -176,14 +188,16 @@ def evaluate_model(checkpoint_path: str) -> Dict[str, float]:
         persistent_workers=True,
         collate_fn=lambda batch: collate_fn(batch, feature_extractor, config),
     )
-    logger.info(f"Successfully created validation dataloader with {len(val_loader)} batches")
+    logger.info(
+        f"Successfully created validation dataloader with {len(val_loader)} batches"
+    )
 
     trainer = pl_lightning.Trainer(
         accelerator="auto",
         devices=[1],
         precision="16-mixed",
         enable_checkpointing=False,
-        logger=False
+        logger=False,
     )
     logger.info(f"Successfully initialized trainer")
 
@@ -194,7 +208,7 @@ def evaluate_model(checkpoint_path: str) -> Dict[str, float]:
     logger.info(f"Successfully validated model")
 
     version = os.path.basename(checkpoint_path).split("-v")[-1].split(".ckpt")[0]
-    eval_dir = os.path.join(os.path.dirname(checkpoint_path), f'evaluation_v{version}')
+    eval_dir = os.path.join(os.path.dirname(checkpoint_path), f"evaluation_v{version}")
     os.makedirs(eval_dir, exist_ok=True)
     logger.info(f"Saving evaluation results to {eval_dir}")
 
@@ -202,8 +216,8 @@ def evaluate_model(checkpoint_path: str) -> Dict[str, float]:
     all_labels_arr = []
     logger.info(f"Number of test step outputs: {len(model.test_step_outputs)}")
     for output in model.test_step_outputs:
-        all_preds.extend(output['preds'].cpu().numpy())
-        all_labels_arr.extend(output['labels'].cpu().numpy())
+        all_preds.extend(output["preds"].cpu().numpy())
+        all_labels_arr.extend(output["labels"].cpu().numpy())
 
     all_preds = np.array(all_preds)
     all_labels_arr = np.array(all_labels_arr)
@@ -216,31 +230,36 @@ def evaluate_model(checkpoint_path: str) -> Dict[str, float]:
         sns.heatmap(
             confusion_matrix(all_labels_arr, all_preds),
             annot=True,
-            fmt='d',
+            fmt="d",
             xticklabels=labels,
-            yticklabels=labels
+            yticklabels=labels,
         )
-        plt.title('Confusion Matrix')
-        plt.ylabel('True Label')
-        plt.xlabel('Predicted Label')
+        plt.title("Confusion Matrix")
+        plt.ylabel("True Label")
+        plt.xlabel("Predicted Label")
         plt.xticks(rotation=45)
         plt.yticks(rotation=45)
         wandb.log({"confusion_matrix": wandb.Image(cm_fig)})
         plt.close(cm_fig)
 
     report = classification_report(
-        all_labels_arr,
-        all_preds,
-        target_names=labels,
-        output_dict=True
+        all_labels_arr, all_preds, target_names=labels, output_dict=True
     )
     report_df = pl.DataFrame(
-        {k: v if isinstance(v, dict) else {'precision': v, 'recall': v, 'f1-score': v, 'support': v}
-         for k, v in report.items()}
+        {
+            k: (
+                v
+                if isinstance(v, dict)
+                else {"precision": v, "recall": v, "f1-score": v, "support": v}
+            )
+            for k, v in report.items()
+        }
     ).transpose()
-    report_df.write_parquet(os.path.join(eval_dir, 'classification_report.parquet'))
+    report_df.write_parquet(os.path.join(eval_dir, "classification_report.parquet"))
 
-    error_df = analyze_errors(val_ds, all_preds, all_labels_arr, id_to_label, eval_dir, cache_config)
+    error_df = analyze_errors(
+        val_ds, all_preds, all_labels_arr, id_to_label, eval_dir, cache_config
+    )
 
     logger.info("\nEvaluation Results:")
     logger.info(f"Validation Loss: {results['test_loss']:.4f}")
@@ -250,30 +269,37 @@ def evaluate_model(checkpoint_path: str) -> Dict[str, float]:
     logger.info(f"Validation Recall (Macro): {results['test_recall']:.4f}")
 
     if wandb_api_key and wandb.run is not None:
-        wandb.log({
-            "val_loss": results['test_loss'],
-            "val_accuracy": results['test_acc'],
-            "val_f1": results['test_f1'],
-            "val_precision": results['test_precision'],
-            "val_recall": results['test_recall']
-        })
+        wandb.log(
+            {
+                "val_loss": results["test_loss"],
+                "val_accuracy": results["test_acc"],
+                "val_f1": results["test_f1"],
+                "val_precision": results["test_precision"],
+                "val_recall": results["test_recall"],
+            }
+        )
         wandb.finish()
 
     logger.info(f"\nDetailed results saved in: {eval_dir}")
     logger.info(f"- Confusion Matrix: {os.path.join(eval_dir, 'confusion_matrix.png')}")
-    logger.info(f"- Classification Report: {os.path.join(eval_dir, 'classification_report.parquet')}")
+    logger.info(
+        f"- Classification Report: {os.path.join(eval_dir, 'classification_report.parquet')}"
+    )
     logger.info(f"- Error Analysis: {os.path.join(eval_dir, 'error_analysis.parquet')}")
     return results
+
 
 if __name__ == "__main__":
     config: Config
     cache_config: CacheConfig
-    config, cache_config = get_config('classification')
+    config, cache_config = get_config("classification")
     model_dir = config.output_dir
     ckpt_list = sorted(glob.glob(os.path.join(model_dir, "best-checkpoint-v*.ckpt")))
     if not ckpt_list:
-        raise ValueError(f"No checkpoint found in {model_dir} matching best-checkpoint-v*.ckpt")
-    checkpoint_path = ckpt_list[-1] 
+        raise ValueError(
+            f"No checkpoint found in {model_dir} matching best-checkpoint-v*.ckpt"
+        )
+    checkpoint_path = ckpt_list[-1]
 
     logger.info(f"Using checkpoint: {checkpoint_path}")
     evaluate_model(checkpoint_path)

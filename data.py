@@ -10,7 +10,10 @@ import json
 import logging
 import re
 from typing import Dict, Any, List, Optional, Union, Set, Tuple
-from config import Config, CacheConfig # Assuming Config and CacheConfig are defined here
+from config import (
+    Config,
+    CacheConfig,
+)  # Assuming Config and CacheConfig are defined here
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +30,7 @@ class VaaniDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         dataset: dts.Dataset,
-        processor: Any, # Type hint for processor depends on its actual type
+        processor: Any,  # Type hint for processor depends on its actual type
         label_to_id: Dict[str, int],
         is_train: bool = False,
         config: Optional[Config] = None,
@@ -61,9 +64,7 @@ class VaaniDataset(torch.utils.data.Dataset):
                 audio = audio.astype(type(audio[0]))
 
             if np.random.random() < self.config.augmentation.prob_pitch:
-                n_steps = np.random.choice(
-                    self.config.augmentation.pitch_shift_steps
-                )
+                n_steps = np.random.choice(self.config.augmentation.pitch_shift_steps)
                 audio = librosa.effects.pitch_shift(y=audio, sr=16000, n_steps=n_steps)
 
         if self.task == "transcription":
@@ -82,23 +83,25 @@ class VaaniDataset(torch.utils.data.Dataset):
             raise ValueError(f"Unsupported task type: {self.task}")
 
 
-def _load_vaani_dataset(config: Config, cache_config: CacheConfig) -> Tuple[dts.Dataset, dts.Dataset, dts.Dataset]:
+def _load_vaani_dataset(
+    config: Config, cache_config: CacheConfig
+) -> Tuple[dts.Dataset, dts.Dataset, dts.Dataset]:
     """Loads and prepares the ARTPARK-IISC/Vaani dataset."""
     trains, tests, vals = [], [], []
-    confs = config.dataset.configs 
+    confs = config.dataset.configs
     for conf in tqdm(confs):
         ds = dts.load_dataset(
-            config.dataset.name,  
+            config.dataset.name,
             conf,
             split="train",
-            cache_dir=config.cache_dir,  
-            num_proc=cache_config.num_proc,  
-            revision=config.dataset.revision,  
+            cache_dir=config.cache_dir,
+            num_proc=cache_config.num_proc,
+            revision=config.dataset.revision,
         )
 
         ds = ds.rename_column("district", "dialect")
 
-        spIDs = ds[cache_config.split_key]  
+        spIDs = ds[cache_config.split_key]
         unq_spIDs = np.unique(spIDs)
         test_spIDs = np.random.choice(
             unq_spIDs, size=int(0.1 * len(unq_spIDs)), replace=False
@@ -133,17 +136,20 @@ def _load_vaani_dataset(config: Config, cache_config: CacheConfig) -> Tuple[dts.
             )
 
         def val_filter(r: Dict[str, Any]) -> bool:
-            return (r[cache_config.split_key] in val_spIDs) and (
-                r["language"] == cache_config.language
-                if cache_config.task_type == "dialect"
-                else True
-            ) and (len(r["audio"]["array"]) / 16000 >= cache_config.min_seconds)
+            return (
+                (r[cache_config.split_key] in val_spIDs)
+                and (
+                    r["language"] == cache_config.language
+                    if cache_config.task_type == "dialect"
+                    else True
+                )
+                and (len(r["audio"]["array"]) / 16000 >= cache_config.min_seconds)
+            )
 
         train_ds = ds.filter(train_filter, num_proc=cache_config.num_proc)
         test_ds = ds.filter(test_filter, num_proc=cache_config.num_proc)
         val_ds = ds.filter(val_filter, num_proc=cache_config.num_proc)
 
-        
         logger.info(f"{conf} sizes after filtering:")
         logger.info(f"Train set: {len(train_ds)} samples")
         logger.info(f"Test set: {len(test_ds)} samples")
@@ -160,11 +166,13 @@ def _load_vaani_dataset(config: Config, cache_config: CacheConfig) -> Tuple[dts.
     )
 
 
-def remove_special_characters(batch: Dict[str, List[Optional[str]]], chars_to_remove_regex: str) -> Dict[str, List[str]]:
+def remove_special_characters(
+    batch: Dict[str, List[Optional[str]]], chars_to_remove_regex: str
+) -> Dict[str, List[str]]:
     """Cleans transcripts by removing special characters and tags."""
     clean_transcripts = []
     for transcript in batch["transcript"]:
-        
+
         if transcript is None:
             clean_transcripts.append("")
 
@@ -190,22 +198,24 @@ def remove_special_characters(batch: Dict[str, List[Optional[str]]], chars_to_re
     return batch
 
 
-def _load_vaani_transcripts_dataset(config: Config, cache_config: CacheConfig) -> Tuple[dts.Dataset, dts.Dataset, dts.Dataset, Dict[str, int], Set[str]]:
+def _load_vaani_transcripts_dataset(
+    config: Config, cache_config: CacheConfig
+) -> Tuple[dts.Dataset, dts.Dataset, dts.Dataset, Dict[str, int], Set[str]]:
     """Loads and prepares the ARTPARK-IISC/Vaani dataset."""
-    conf = config.dataset.configs  
+    conf = config.dataset.configs
     ds = dts.load_dataset(
-        config.dataset.name,  
+        config.dataset.name,
         conf,
-        cache_dir=config.cache_dir,  
-        num_proc=cache_config.num_proc,  
-        revision=config.dataset.revision,  
+        cache_dir=config.cache_dir,
+        num_proc=cache_config.num_proc,
+        revision=config.dataset.revision,
     )
 
     num_rows = sum(ds.num_rows.values())
     logger.info(f"{conf} size before duration filtering: {num_rows} samples")
     ds = ds.filter(
-        lambda r: len(r["audio"]["array"]) / 16000 >= cache_config.min_seconds,  
-        num_proc=cache_config.num_proc,  
+        lambda r: len(r["audio"]["array"]) / 16000 >= cache_config.min_seconds,
+        num_proc=cache_config.num_proc,
     )
 
     ds = ds.rename_column("district", "dialect")
@@ -253,7 +263,6 @@ def _load_vaani_transcripts_dataset(config: Config, cache_config: CacheConfig) -
         vocab_dict[dialect_token] = current_id
         current_id += 1
 
-    
     for char in sorted(list(vocab_set)):
         vocab_dict[char] = current_id
         current_id += 1
@@ -262,7 +271,7 @@ def _load_vaani_transcripts_dataset(config: Config, cache_config: CacheConfig) -
     logger.info(f"Validation set: {ds.num_rows['validation']} samples")
     logger.info(f"Test set: {ds.num_rows['test']} samples")
 
-    return (  
+    return (
         ds["train"],
         ds["test"],
         ds["test"],
@@ -271,7 +280,9 @@ def _load_vaani_transcripts_dataset(config: Config, cache_config: CacheConfig) -
     )  # since the validation set is a joke
 
 
-def _load_respin_dataset(config: Config, cache_config: CacheConfig) -> Tuple[dts.Dataset, dts.Dataset, dts.Dataset]:
+def _load_respin_dataset(
+    config: Config, cache_config: CacheConfig
+) -> Tuple[dts.Dataset, dts.Dataset, dts.Dataset]:
     """Loads and prepares the Respin dataset."""
     with open("data/respin/train/meta_train_te_small.json") as f:
         meta_train = json.load(f)
@@ -294,14 +305,13 @@ def _load_respin_dataset(config: Config, cache_config: CacheConfig) -> Tuple[dts
                 x["wav_path"],
             )
         },
-        num_proc=cache_config.num_proc,  
+        num_proc=cache_config.num_proc,
     )
     train_ds = train_ds.cast_column("wav_path", dts.Value("string")).cast_column(
         "wav_path", dts.Audio()
     )
     train_ds = train_ds.rename_column("wav_path", "audio")
 
-    
     with open("data/respin/val/meta_dev_te.json") as f:
         meta_val = json.load(f)
 
@@ -318,14 +328,13 @@ def _load_respin_dataset(config: Config, cache_config: CacheConfig) -> Tuple[dts
                 x["wav_path"],
             )
         },
-        num_proc=cache_config.num_proc,  
+        num_proc=cache_config.num_proc,
     )
     val_ds = val_ds.cast_column("wav_path", dts.Value("string")).cast_column(
         "wav_path", dts.Audio()
     )
     val_ds = val_ds.rename_column("wav_path", "audio")
 
-    
     test_ds = dts.Dataset.from_dict(train_ds[:0])
 
     logger.info(f"Train set: {len(train_ds)} samples")
@@ -335,7 +344,11 @@ def _load_respin_dataset(config: Config, cache_config: CacheConfig) -> Tuple[dts
     return train_ds, test_ds, val_ds
 
 
-def load_datasets(config: Config, cache_config: CacheConfig) -> Tuple[dts.Dataset, dts.Dataset, dts.Dataset, Optional[Dict[str, int]], Optional[Set[str]]]:
+def load_datasets(
+    config: Config, cache_config: CacheConfig
+) -> Tuple[
+    dts.Dataset, dts.Dataset, dts.Dataset, Optional[Dict[str, int]], Optional[Set[str]]
+]:
     """Load and prepare datasets based on the configuration."""
     dataset_name = config.dataset.name
 
@@ -344,7 +357,9 @@ def load_datasets(config: Config, cache_config: CacheConfig) -> Tuple[dts.Datase
     elif dataset_name == "Respin":
         return _load_respin_dataset(config, cache_config)
     elif dataset_name == "ARTPARK-IISc/Vaani-transcription-part":
-        train_ds, test_ds, val_ds, vocab_dict, dialects = _load_vaani_transcripts_dataset(config, cache_config)
+        train_ds, test_ds, val_ds, vocab_dict, dialects = (
+            _load_vaani_transcripts_dataset(config, cache_config)
+        )
         return train_ds, test_ds, val_ds, vocab_dict, dialects
     else:
         raise ValueError(f"Unsupported dataset name: {dataset_name}")
