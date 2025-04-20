@@ -12,12 +12,12 @@ import re
 from collections import defaultdict
 
 import pytorch_lightning as pl
-from transformers import Wav2Vec2Processor
+from transformers import Wav2Vec2Processor, WhisperProcessor, WhisperTokenizer, Wav2Vec2FeatureExtractor
 from huggingface_hub import login
 
-from models import TranscriptionLitModel
+from models_vaani import TranscriptionLitModel
 from data import VaaniDataset, ResumableDataLoader, load_datasets
-from config import TRANSCRIPTION_CONFIG, TRANSCRIPTION_CACHE_CONFIG, set_seeds, logger
+from config import get_config, set_seeds, logger
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Evaluate a trained ASR model')
@@ -39,25 +39,27 @@ def remove_dialect(text):
 
 def evaluate_model(checkpoint_path, output_dir=None, batch_size=16, split='test'):
     """Evaluate the transcription model."""
-    # Set the device
+    config_updates = {'output_dir': output_dir} if output_dir else {}
+    config, cache_config = get_config('transcription', config_updates)
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    
-    # Initial setup
-    set_seeds()
-    login(TRANSCRIPTION_CONFIG["hf_token"])
-    
-    # If output_dir is not specified, use the checkpoint directory
-    if output_dir is None:
-        output_dir = os.path.dirname(checkpoint_path)
-    
-    # Make sure output directory exists
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Load the processor
+    set_seeds(cache_config.random_seed)
+    login(config.hf_token)
+
     processor_path = os.path.dirname(checkpoint_path)
-    processor = Wav2Vec2Processor.from_pretrained(processor_path)
+    try:
+        processor = WhisperProcessor.from_pretrained(processor_path)
+        logger.info("Loaded WhisperProcessor")
+    except:
+        try:
+            processor = {
+                "tokenizer": WhisperTokenizer.from_pretrained(processor_path),
+                "feature_extractor": Wav2Vec2FeatureExtractor.from_pretrained(processor_path)
+            }
+            logger.info("Loaded Wav2Vec2 processor components")
+        except Exception as e:
+            logger.error(f"Failed to load processor: {e}")
+            raise
     
-    # Load model from checkpoint
     model = TranscriptionLitModel.load_from_checkpoint(
         checkpoint_path,
         processor=processor
@@ -65,28 +67,23 @@ def evaluate_model(checkpoint_path, output_dir=None, batch_size=16, split='test'
     model.to(device)
     model.eval()
     
-    # Load dataset
-    _, test_ds, val_ds = load_datasets(TRANSCRIPTION_CONFIG, TRANSCRIPTION_CACHE_CONFIG)
+    _, test_ds, val_ds = load_datasets(config, cache_config)
     
-    # Use appropriate split
     eval_ds = test_ds if split == 'test' else val_ds
     
-    # Get all unique dialects
     all_dialects = sorted(set(eval_ds["dialect"]))
     label_to_id = {dialect: i for i, dialect in enumerate(all_dialects)}
     
-    # Create evaluation dataset
     eval_dataset = VaaniDataset(
         eval_ds,
         processor,
         label_to_id,
         is_train=False,
-        config=TRANSCRIPTION_CONFIG,
-        cache_config=TRANSCRIPTION_CACHE_CONFIG,
+        config=config,
+        cache_config=cache_config,
         task="transcription"
     )
     
-    # Create dataloader
     eval_loader = ResumableDataLoader(
         eval_dataset,
         batch_size=batch_size,
@@ -95,7 +92,6 @@ def evaluate_model(checkpoint_path, output_dir=None, batch_size=16, split='test'
         collate_fn=collate_fn
     )
     
-    # Initialize metrics
     all_wer = []
     all_cer = []
     dialect_predictions = []
@@ -104,73 +100,66 @@ def evaluate_model(checkpoint_path, output_dir=None, batch_size=16, split='test'
     all_ground_truth = []
     dialect_metrics = defaultdict(lambda: {'correct': 0, 'total': 0, 'wer': []})
     
-    # Evaluate model
     logger.info(f"Evaluating model on {len(eval_dataset)} examples from {split} set")
     
     for batch in tqdm(eval_loader, desc="Evaluating"):
         with torch.no_grad():
-            # Move batch to device
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             
-            # Get model predictions
             outputs = model.model(
                 input_values=batch["input_values"],
                 attention_mask=batch.get("attention_mask", None)
             )
             
-            # Get predicted token IDs
-            predicted_ids = torch.argmax(outputs.logits, dim=-1)
+            if isinstance(processor, WhisperProcessor):
+                generated_ids = model.model.whisper.generate(
+                    input_features=batch["input_values"],
+                    max_length=225
+                )
+                pred_strings = processor.batch_decode(generated_ids, skip_special_tokens=True)
+                
+                label_strings = processor.batch_decode(batch["labels"], skip_special_tokens=True)
+            else:
+                logits = outputs.logits
+                predicted_ids = torch.argmax(logits, dim=-1)
+                pred_strings = processor["tokenizer"].batch_decode(predicted_ids)
+                
+                labels = batch["labels"].detach().cpu().numpy()
+                labels = np.where(labels != -100, labels, processor["tokenizer"].pad_token_id)
+                label_strings = processor["tokenizer"].batch_decode(labels)
             
-            # Convert predictions to text
-            pred_strings = processor.batch_decode(predicted_ids)
-            
-            # Convert labels to text
-            labels = batch["labels"].detach().cpu().numpy()
-            labels = np.where(labels != -100, labels, processor.tokenizer.pad_token_id)
-            label_strings = processor.batch_decode(labels)
-            
-            # Extract dialects from predictions and ground truth
             for pred, label in zip(pred_strings, label_strings):
                 pred_dialect = extract_dialect(pred)
                 label_dialect = extract_dialect(label)
                 
-                # Process only if we have both dialect and transcript
                 if label_dialect:
-                    # Remove dialect token for WER/CER calculation
                     pred_text = remove_dialect(pred)
                     label_text = remove_dialect(label)
                     
-                    # Calculate WER and CER
                     wer = jiwer.wer(label_text, pred_text)
                     cer = jiwer.cer(label_text, pred_text)
                     
                     all_wer.append(wer)
                     all_cer.append(cer)
                     
-                    # Track dialect predictions
                     dialect_predictions.append(pred_dialect if pred_dialect else "unknown")
                     dialect_ground_truth.append(label_dialect)
                     
-                    # Store full predictions and ground truth
                     all_predictions.append(pred)
                     all_ground_truth.append(label)
                     
-                    # Update dialect-specific metrics
                     dialect = label_dialect
                     dialect_metrics[dialect]['total'] += 1
                     if pred_dialect == label_dialect:
                         dialect_metrics[dialect]['correct'] += 1
                     dialect_metrics[dialect]['wer'].append(wer)
     
-    # Calculate overall metrics
     overall_wer = sum(all_wer) / len(all_wer) if all_wer else 0
     overall_cer = sum(all_cer) / len(all_cer) if all_cer else 0
     
-    # Calculate overall dialect accuracy
     correct_dialects = sum(1 for p, l in zip(dialect_predictions, dialect_ground_truth) if p == l)
     dialect_accuracy = correct_dialects / len(dialect_ground_truth) if dialect_ground_truth else 0
     
-    # Calculate dialect-specific metrics
     dialect_results = {}
     for dialect, metrics in dialect_metrics.items():
         accuracy = metrics['correct'] / metrics['total'] if metrics['total'] > 0 else 0
@@ -181,22 +170,18 @@ def evaluate_model(checkpoint_path, output_dir=None, batch_size=16, split='test'
             'wer': avg_wer
         }
     
-    # Print summary
     logger.info(f"Overall WER: {overall_wer:.4f}")
     logger.info(f"Overall CER: {overall_cer:.4f}")
     logger.info(f"Overall Dialect Accuracy: {dialect_accuracy:.4f}")
     
-    # Create confusion matrix for dialect prediction
     dialect_labels = sorted(set(dialect_ground_truth))
     cm = np.zeros((len(dialect_labels), len(dialect_labels)), dtype=int)
     
-    # Populate confusion matrix
     dialect_to_idx = {dialect: i for i, dialect in enumerate(dialect_labels)}
     for true, pred in zip(dialect_ground_truth, dialect_predictions):
-        if pred in dialect_to_idx:  # Handle the case where prediction is "unknown"
+        if pred in dialect_to_idx:
             cm[dialect_to_idx[true], dialect_to_idx[pred]] += 1
     
-    # Plot and save confusion matrix
     plt.figure(figsize=(12, 10))
     sns.heatmap(cm, annot=True, fmt='d', xticklabels=dialect_labels, yticklabels=dialect_labels)
     plt.title('Dialect Prediction Confusion Matrix')
@@ -206,7 +191,6 @@ def evaluate_model(checkpoint_path, output_dir=None, batch_size=16, split='test'
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'dialect_confusion_matrix.png'))
     
-    # Create and save a results DataFrame
     results_df = pd.DataFrame({
         'prediction': all_predictions,
         'ground_truth': all_ground_truth,
@@ -219,14 +203,12 @@ def evaluate_model(checkpoint_path, output_dir=None, batch_size=16, split='test'
     
     results_df.to_csv(os.path.join(output_dir, f'transcription_results_{split}.csv'), index=False)
     
-    # Save dialect-specific results
     dialect_df = pd.DataFrame(
         [{'dialect': k, **v} for k, v in dialect_results.items()]
     ).sort_values('dialect')
     
     dialect_df.to_csv(os.path.join(output_dir, f'dialect_results_{split}.csv'), index=False)
     
-    # Save summary metrics
     metrics = {
         'overall_wer': overall_wer,
         'overall_cer': overall_cer,
@@ -238,7 +220,6 @@ def evaluate_model(checkpoint_path, output_dir=None, batch_size=16, split='test'
     with open(os.path.join(output_dir, f'metrics_summary_{split}.json'), 'w') as f:
         json.dump(metrics, f, indent=2)
     
-    # Plot dialect-specific WER and accuracy
     plt.figure(figsize=(12, 8))
     sns.barplot(x='dialect', y='wer', data=dialect_df)
     plt.title('Word Error Rate by Dialect')
@@ -253,18 +234,15 @@ def evaluate_model(checkpoint_path, output_dir=None, batch_size=16, split='test'
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'dialect_accuracy_{split}.png'))
     
-    # Return metrics for external use
     return metrics
 
 def collate_fn(batch):
     """
     Custom collate function for handling variable length inputs.
     """
-    # Get input values and labels
     input_values = [item["input_values"] for item in batch]
     labels = [item["labels"] for item in batch]
     
-    # Pad input values and create attention mask
     input_lengths = [len(x) for x in input_values]
     max_input_length = max(input_lengths)
     
@@ -272,7 +250,6 @@ def collate_fn(batch):
     attention_mask = []
     
     for item, length in zip(input_values, input_lengths):
-        # Pad input values
         padded = torch.nn.functional.pad(
             item, 
             (0, max_input_length - length), 
@@ -281,7 +258,6 @@ def collate_fn(batch):
         )
         padded_input_values.append(padded)
         
-        # Create attention mask
         mask = torch.ones(length)
         mask = torch.nn.functional.pad(
             mask, 
@@ -291,18 +267,15 @@ def collate_fn(batch):
         )
         attention_mask.append(mask)
     
-    # Stack tensors
     input_values = torch.stack(padded_input_values)
     attention_mask = torch.stack(attention_mask)
     
-    # Pad labels
     label_lengths = [len(x) for x in labels]
     max_label_length = max(label_lengths)
     
     padded_labels = []
     
     for item, length in zip(labels, label_lengths):
-        # Pad labels
         padded = torch.nn.functional.pad(
             item, 
             (0, max_label_length - length), 
@@ -326,4 +299,4 @@ if __name__ == "__main__":
         args.output_dir, 
         args.batch_size, 
         args.split
-    ) 
+    )

@@ -2,6 +2,9 @@ import os
 import logging
 import pytorch_lightning as pl
 import torch
+import copy
+from dataclasses import dataclass, field, asdict, is_dataclass
+from typing import Dict, List, Any, Optional, Union
 
 hf_token = os.environ.get("HF_TOKEN_K")
 
@@ -75,6 +78,16 @@ selected_districts_per_state = [
     "WestBengal_DakshinDinajpur",
 ]
 
+hindi_districts_per_state = [
+    "Bihar_Purnia",
+    "Maharashtra_Solapur",
+    "UttarPradesh_Varanasi",
+    # "Rajasthan_Nagaur",
+    "Uttarakhand_Uttarkashi",
+    "Karnataka_Bijapur",
+    "Chhattisgarh_Bastar",
+]
+
 andhra_pradesh_districts = [
     "AndhraPradesh_Anantpur",
     "AndhraPradesh_Chittoor",
@@ -83,193 +96,284 @@ andhra_pradesh_districts = [
     "AndhraPradesh_Srikakulam",
     "AndhraPradesh_Vishakapattanam",
 ]
-# Configuration
-CACHE_SENSITIVE_CONFIG = {
-    "random_seed": 41,
-    "language": "Telugu",
-    "num_proc": 10,
-    "min_seconds": 0,
-    "task_type": "dialect",
-    "split_key": "pincode",
-    "min_stay": 0,
-}
 
-CONFIG = {
-    "data_dir": "/mnt/c1e1833e-4df6-4c4c-88aa-8cd3d7d3932b/vaani/data",
-    "cache_dir": "/mnt/c1e1833e-4df6-4c4c-88aa-8cd3d7d3932b/vaani/data",
-    "base_dir": "/mnt/c1e1833e-4df6-4c4c-88aa-8cd3d7d3932b/vaani/models",
-    "hf_token": hf_token,
-    "batch_size": 64,
-    "name": "Vaani",
-    "resume": False,
-    # "dataset": {
-    #    "name": "Respin",
-    # },
-    "dataset": {
-        "name": "ARTPARK-IISC/Vaani",
-        "configs": andhra_pradesh_districts,
-        # "revision": "33434cee57f8f96fd7c46641c9394310888d2f97",
-        "revision": "0816973e005ca2377c8ffa65323c2bb866e24fbf",
-    },
-    "model": {
-        # "name": "facebook/mms-300m",
-        # "name": "facebook/wav2vec2-xls-r-300m",
-        # "processor": "facebook/wav2vec2-base",
-        "feature_extractor": "facebook/wav2vec2-base",
-        "name": "facebook/wav2vec2-conformer-rope-large-960h-ft", 
-        "processor": "facebook/wav2vec2-conformer-rope-large-960h-ft",
-        # "name": "facebook/w2v-bert-2.0",
-        # "feature_extractor": "facebook/w2v-bert-2.0",
-    },
-    "model_config": {
-        "attention_dropout": 0.01,
-        "hidden_dropout": 0.01,
-        "feat_proj_dropout": 0.01,
-        "mask_time_prob": 0.01,
-        "layerdrop": 0.01,
-        "num_seconds" : 10,
-        "mean_pool": True,
-    },
-    "augmentation": {
-        "noise_factor": 0.03,
-        "pitch_shift_steps": [-2, -1, 1, 2],
-        "prob_noise": 0.5,
-        "prob_pitch": 0.5,
-    },
-    "training": {
-        "learning_rate": 5e-5,
-        "per_device_train_batch_size": 8,
-        "num_train_epochs": 5,
-        "weight_decay": 1e-4,
-        "classifier_only": False,
-        "eval_steps": 10000,
-        "save_steps": 10000,
-        "logging_steps": 5000,
-        "accumulate_grad_batches": 8,
-    },
-}
+@dataclass
+class DatasetConfig:
+    name: str
+    configs: List[str]
+    revision: Optional[str] = None
 
-# Configuration for transcription tasks
-TRANSCRIPTION_CACHE_CONFIG = {
-    "random_seed": 41,
-    "language": "Telugu",  # Change according to your needs
-    "num_proc": 10,
-    "min_seconds": 3,
-    "task_type": "transcription",
-    "split_key": "pincode",
-    "min_stay": 0,
-}
+@dataclass
+class ModelConfig:
+    name: str
+    processor: str
+    feature_extractor: str
+    tokenizer: Optional[str] = None
 
-TRANSCRIPTION_CONFIG = {
-    "data_dir": CONFIG["data_dir"],
-    "cache_dir": CONFIG["cache_dir"],
-    "base_dir": CONFIG["base_dir"],
-    "hf_token": CONFIG["hf_token"],
-    "batch_size": 16,  # Smaller batch size for longer sequences
-    "name": "Vaani-Transcription",
-    "resume": False,
-    "dataset": {
-        "name": "ARTPARK-IISc/Vaani-transcription-part",
-        "configs": "Telugu",
-        "revision": None,
-    },
-    "model": {
-        # "name": "facebook/wav2vec2-xls-r-300m",  # Good multilingual model
-        # "feature_extractor": "facebook/wav2vec2-xls-r-300m",
-        # "processor": "facebook/wav2vec2-xls-r-300m",
+@dataclass 
+class ModelArchConfig:
+    attention_dropout: float
+    hidden_dropout: float
+    feat_proj_dropout: float
+    mask_time_prob: float
+    layerdrop: float
+    num_seconds: int
+    mean_pool: bool = True
+    ctc_loss_reduction: Optional[str] = None
+    ctc_zero_infinity: Optional[bool] = None
+    max_target_position: Optional[int] = None
+    vocab_size: Optional[int] = None
+    pad_token_id: Optional[int] = None
+    bos_token_id: Optional[int] = None
+    eos_token_id: Optional[int] = None
 
-        # whisper
-        "name": "vasista22/whisper-telugu-medium",
-        "feature_extractor": "vasista22/whisper-telugu-medium",
-        "processor": "vasista22/whisper-telugu-medium",
-    },
-    "model_config": {
-        "attention_dropout": 0.05,
-        "hidden_dropout": 0.05,
-        "feat_proj_dropout": 0.05,
-        "mask_time_prob": 0.05,
-        "layerdrop": 0.05,
-        "ctc_loss_reduction": "mean",
-        "ctc_zero_infinity": True,
-    },
-    "augmentation": {
-        "noise_factor": 0.0,
-        "pitch_shift_steps": [-2, -1, 1, 2],
-        "prob_noise": 0.0,
-        "prob_pitch": 0.0,
-    },
-    "training": {
-        "learning_rate": 1e-5,
-        "per_device_train_batch_size": 16,
-        "num_train_epochs": 20,
-        "weight_decay": 1e-4,
-        "classifier_only": False,
-        "eval_steps": 2000,
-        "save_steps": 2000,
-        "logging_steps": 2000,
-        "accumulate_grad_batches": 1,
-    },
-}
+@dataclass
+class AugmentationConfig:
+    noise_factor: float
+    pitch_shift_steps: List[int]
+    prob_noise: float
+    prob_pitch: float
 
-def generate_output_dir():
-    """Generate output directory name based on configuration."""
-    base_dir = CONFIG["base_dir"]
-    model_name = (
-        f"{CONFIG['model']['name'].split('/')[-1]}"
-        f"_frozen_{CONFIG['training']['classifier_only']}"
-        f"_task_{CACHE_SENSITIVE_CONFIG['task_type']}"
-        f"_{CONFIG['name']}"
-        f"_{CACHE_SENSITIVE_CONFIG['language']}"
-        f"_lr_{CONFIG['training']['learning_rate']}"
-        f"_dropouts_{CONFIG['model_config']['attention_dropout']}"
-        f"_{CONFIG['model_config']['hidden_dropout']}"
-        f"_{CONFIG['model_config']['feat_proj_dropout']}"
-        f"_{CONFIG['model_config']['mask_time_prob']}"
-        f"_{CONFIG['model_config']['layerdrop']}"
-        f"_split_by_{CACHE_SENSITIVE_CONFIG['split_key']}"
+@dataclass
+class TrainingConfig:
+    learning_rate: float
+    per_device_train_batch_size: int
+    num_train_epochs: int
+    weight_decay: float
+    classifier_only: bool
+    eval_steps: Optional[int] = None
+    save_steps: Optional[int] = None
+    logging_steps: int = 500
+    accumulate_grad_batches: int = 1
+    val_check_interval: Optional[float] = None
+
+@dataclass
+class Config:
+    data_dir: str
+    cache_dir: str
+    base_dir: str
+    hf_token: str
+    batch_size: int
+    name: str
+    resume: bool
+    dataset: DatasetConfig
+    model: ModelConfig
+    model_config: ModelArchConfig
+    augmentation: AugmentationConfig
+    training: TrainingConfig
+    output_dir: Optional[str] = None
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        setattr(self, key, value)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+@dataclass
+class CacheConfig:
+    random_seed: int
+    language: str
+    num_proc: int
+    min_seconds: int
+    task_type: str
+    split_key: str
+    min_stay: int
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        setattr(self, key, value)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+# Base configurations as dataclass instances
+CONFIG = Config(
+    data_dir="/scratch/yasaswini/data",
+    cache_dir="/scratch/yasaswini/data",
+    base_dir="/scratch/karthik/models",
+    hf_token=hf_token,
+    batch_size=64,
+    name="Vaani",
+    resume=False,
+    dataset=DatasetConfig(
+        name="ARTPARK-IISC/Vaani",
+        configs=hindi_districts_per_state,
+        revision="0816973e005ca2377c8ffa65323c2bb866e24fbf"
+    ),
+    model=ModelConfig(
+        name="facebook/wav2vec2-xls-r-300m",
+        processor="facebook/wav2vec2-base",
+        feature_extractor="facebook/wav2vec2-base"
+    ),
+    model_config=ModelArchConfig(
+        attention_dropout=0.01,
+        hidden_dropout=0.01,
+        feat_proj_dropout=0.01,
+        mask_time_prob=0.01,
+        layerdrop=0.01,
+        num_seconds=10,
+        mean_pool=True
+    ),
+    augmentation=AugmentationConfig(
+        noise_factor=0.03,
+        pitch_shift_steps=[-2, -1, 1, 2],
+        prob_noise=0.5,
+        prob_pitch=0.5
+    ),
+    training=TrainingConfig(
+        learning_rate=1e-5,
+        per_device_train_batch_size=8,
+        num_train_epochs=5,
+        weight_decay=1e-4,
+        classifier_only=False,
+        eval_steps=500,
+        save_steps=500,
+        logging_steps=500,
+        accumulate_grad_batches=8
     )
-
-    if not CONFIG["model_config"]["mean_pool"]:
-        model_name += f"_cnn"
-
-    if CONFIG["augmentation"]["prob_noise"] > 0:
-        model_name += f"_noisy_{CONFIG['augmentation']['prob_noise']}"
-    if CONFIG["augmentation"]["prob_pitch"] > 0:
-        model_name += f"_pitch_shifted_{CONFIG['augmentation']['prob_pitch']}"
-
-    return os.path.join(base_dir, model_name)
-
-# Set output directory
-CONFIG["output_dir"] = generate_output_dir()
-
-# Create output directory
-os.makedirs(CONFIG["output_dir"], exist_ok=True)
-
-# Set environment variables
-os.environ["HF_HOME"] = CONFIG["data_dir"]
-os.environ["HF_DATASETS_CACHE"] = CONFIG["cache_dir"]
-
-# Set transcription output directory
-TRANSCRIPTION_CONFIG["output_dir"] = os.path.join(
-    TRANSCRIPTION_CONFIG["base_dir"],
-    f"{TRANSCRIPTION_CONFIG['model']['name'].split('/')[-1]}_transcription_{TRANSCRIPTION_CACHE_CONFIG['language']}"
 )
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(os.path.join(CONFIG["output_dir"], "training.log")),
-        logging.StreamHandler(),
-    ],
+CACHE_SENSITIVE_CONFIG = CacheConfig(
+    random_seed=41,
+    language="Hindi",
+    num_proc=10,
+    min_seconds=5,
+    task_type="dialect",
+    split_key="pincode",
+    min_stay=0
 )
-logger = logging.getLogger(__name__)
 
+TRANSCRIPTION_CONFIG = Config(
+    data_dir=CONFIG.data_dir,
+    cache_dir=CONFIG.cache_dir, 
+    base_dir=CONFIG.base_dir,
+    hf_token=CONFIG.hf_token,
+    batch_size=16,
+    name="Vaani-Transcription",
+    resume=False,
+    dataset=DatasetConfig(
+        name="ARTPARK-IISc/Vaani-transcription-part",
+        configs="Telugu",
+        revision=None
+    ),
+    model=ModelConfig(
+        name="facebook/wav2vec2-xls-r-300m",
+        feature_extractor="facebook/wav2vec2-xls-r-300m",
+        processor="facebook/wav2vec2-xls-r-300m",
+        tokenizer="vasista22/whisper-telugu-medium"
+    ),
+    model_config=ModelArchConfig(
+        attention_dropout=0.05,
+        hidden_dropout=0.05,
+        feat_proj_dropout=0.05,
+        mask_time_prob=0.05,
+        layerdrop=0.05,
+        num_seconds=10,
+        ctc_loss_reduction="mean",
+        ctc_zero_infinity=True,
+        max_target_position=448,
+        vocab_size=None,
+        pad_token_id=None,
+        bos_token_id=None,
+        eos_token_id=None
+    ),
+    augmentation=AugmentationConfig(
+        noise_factor=0.0,
+        pitch_shift_steps=[-2, -1, 1, 2],
+        prob_noise=0.0,
+        prob_pitch=0.0
+    ),
+    training=TrainingConfig(
+        learning_rate=1e-5,
+        per_device_train_batch_size=4,
+        num_train_epochs=6,
+        weight_decay=1e-4,
+        classifier_only=False,
+        logging_steps=50,
+        val_check_interval=0.25,
+        accumulate_grad_batches=1
+    )
+)
 
-def set_seeds(seed=None):
+TRANSCRIPTION_CACHE_CONFIG = CacheConfig(
+    random_seed=41,
+    language="Hindi",
+    num_proc=10,
+    min_seconds=3,
+    task_type="transcription",
+    split_key="pincode",
+    min_stay=0
+)
+
+def generate_output_dir(config: Config, cache_config: CacheConfig) -> str:
+    """Generate concise output directory name."""
+    base = config.base_dir  
+    name_parts = [
+        config.model.name.split("/")[-1],  
+        cache_config.task_type,  
+        config.name,  
+    ]
+    dir_name = "_".join(name_parts)
+    return os.path.join(base, dir_name)
+
+def set_seeds(seed: int) -> None:
     """Set random seeds for reproducibility."""
-    if seed is None:
-        seed = CACHE_SENSITIVE_CONFIG["random_seed"]
     pl.seed_everything(seed)
     torch.set_num_threads(1)
+
+def deep_update_dataclass(orig: Any, updates: Dict[str, Any]) -> None:
+    """Recursively update orig (dict or dataclass instance) with values from updates dict."""
+    if is_dataclass(orig):
+        for key, val in updates.items():
+            if hasattr(orig, key):
+                orig_val = getattr(orig, key)
+                if (is_dataclass(orig_val) or isinstance(orig_val, dict)) and isinstance(val, dict):
+                    deep_update_dataclass(orig_val, val)
+                else:
+                    setattr(orig, key, val)
+    elif isinstance(orig, dict):
+         for key, val in updates.items():
+            if key in orig:
+                orig_val = orig[key]
+                if (is_dataclass(orig_val) or isinstance(orig_val, dict)) and isinstance(val, dict):
+                    deep_update_dataclass(orig_val, val)
+                else:
+                    orig[key] = val
+            else:
+                 orig[key] = val
+
+def get_config(task: str = 'classification', config_updates: Optional[Dict[str, Any]] = None, cache_updates: Optional[Dict[str, Any]] = None) -> tuple[Config, CacheConfig]:
+    """
+    Return a pair (config, cache_config), optionally updating defaults.
+    task: 'classification' or 'transcription'
+    config_updates: dict of overrides for config
+    cache_updates: dict of overrides for cache_config
+    Side-effects: creates output_dir, sets HF_HOME and HF_DATASETS_CACHE env vars.
+    """
+    if task == 'classification':
+        base, cache = CONFIG, CACHE_SENSITIVE_CONFIG
+    elif task == 'transcription':
+        base, cache = TRANSCRIPTION_CONFIG, TRANSCRIPTION_CACHE_CONFIG
+    else:
+        raise ValueError(f"Unknown task: {task}")
+
+    config = copy.deepcopy(base)
+    cache_config = copy.deepcopy(cache)
+    if config_updates:
+        deep_update_dataclass(config, config_updates)
+    if cache_updates:
+        deep_update_dataclass(cache_config, cache_updates)
+    config.output_dir = generate_output_dir(config, cache_config)
+    os.makedirs(config.output_dir, exist_ok=True) 
+    os.environ['HF_HOME'] = config.data_dir 
+    os.environ['HF_DATASETS_CACHE'] = config.cache_dir 
+    return config, cache_config
+
+# leave logger configured at module import if desired
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)

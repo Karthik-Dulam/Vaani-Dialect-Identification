@@ -6,106 +6,75 @@ import os
 import argparse
 import torch
 import re
+import numpy as np
 from tqdm import tqdm
-from transformers import Wav2Vec2Processor
-from models import TranscriptionLitModel
+from transformers import Wav2Vec2Processor, WhisperProcessor, WhisperTokenizer, Wav2Vec2FeatureExtractor
+from models_vaani import TranscriptionLitModel
 from data import VaaniDataset, ResumableDataLoader, load_datasets
-from config import TRANSCRIPTION_CONFIG, TRANSCRIPTION_CACHE_CONFIG, set_seeds, logger
+from config import get_config, set_seeds, logger
 
 def extract_dialect(text):
     """Extract dialect tag from text if it exists."""
     match = re.search(r'<([^>]+)>', text)
     return match.group(1) if match else None
 
-def main():
-    parser = argparse.ArgumentParser(description='Check dialect accuracy of a trained ASR model')
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to the checkpoint file')
-    parser.add_argument('--num_samples', type=int, default=100, help='Number of samples to evaluate')
-    parser.add_argument('--split', type=str, default='validation', choices=['test', 'validation'], 
-                        help='Dataset split to evaluate on')
-    args = parser.parse_args()
-    
-    # Set up device
+def evaluate_dialect_accuracy(config, cache_config, checkpoint_path, num_samples=100, split='validation'):
+    """Evaluate dialect accuracy for a checkpoint using provided configs."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Set random seed
-    set_seeds()
-    
-    # Load processor
-    processor_path = os.path.dirname(args.checkpoint)
-    processor = Wav2Vec2Processor.from_pretrained(processor_path)
-    
-    # Load model
+    set_seeds(cache_config.random_seed)
+    processor_path = os.path.dirname(checkpoint_path)
+    try:
+        processor = WhisperProcessor.from_pretrained(processor_path)
+        logger.info("Loaded WhisperProcessor")
+    except:
+        try:
+            processor = {
+                "tokenizer": WhisperTokenizer.from_pretrained(processor_path),
+                "feature_extractor": Wav2Vec2FeatureExtractor.from_pretrained(processor_path)
+            }
+            logger.info("Loaded Wav2Vec2 processor components")
+        except Exception as e:
+            logger.error(f"Failed to load processor: {e}")
+            raise
     model = TranscriptionLitModel.load_from_checkpoint(
-        args.checkpoint,
+        checkpoint_path,
         processor=processor
     )
     model.to(device)
     model.eval()
-    
-    # Load dataset
-    _, test_ds, val_ds = load_datasets(TRANSCRIPTION_CONFIG, TRANSCRIPTION_CACHE_CONFIG)
-    eval_ds = test_ds if args.split == 'test' else val_ds
-    
-    # Get dialects
+    _, test_ds, val_ds = load_datasets(config, cache_config)
+    eval_ds = test_ds if split == 'test' else val_ds
     all_dialects = sorted(set(eval_ds["dialect"]))
-    label_to_id = {dialect: i for i, dialect in enumerate(all_dialects)}
-    
-    # Create dataset
-    eval_dataset = VaaniDataset(
-        eval_ds,
-        processor,
-        label_to_id,
-        is_train=False,
-        config=TRANSCRIPTION_CONFIG,
-        cache_config=TRANSCRIPTION_CACHE_CONFIG,
-        task="transcription"
-    )
-    
-    # Limit to specified number of samples
-    if args.num_samples < len(eval_dataset):
-        indices = torch.randperm(len(eval_dataset))[:args.num_samples].tolist()
+    label_to_id = {d: i for i, d in enumerate(all_dialects)}
+    eval_dataset = VaaniDataset(eval_ds, processor, label_to_id, is_train=False, config=config, cache_config=cache_config, task="transcription")
+    if num_samples < len(eval_dataset):
+        indices = torch.randperm(len(eval_dataset))[:num_samples].tolist()
         subset = torch.utils.data.Subset(eval_dataset, indices)
     else:
         subset = eval_dataset
-    
-    # Create dataloader
-    eval_loader = torch.utils.data.DataLoader(
-        subset,
-        batch_size=16,
-        shuffle=False,
-        collate_fn=collate_fn
-    )
-    
-    # Evaluate
-    dialect_correct = 0
-    total = 0
-    wer_total = 0
-    
-    for batch in tqdm(eval_loader, desc=f"Evaluating {args.split} set"):
+    eval_loader = torch.utils.data.DataLoader(subset, batch_size=16, shuffle=False, collate_fn=collate_fn)
+    dialect_correct = total = wer_total = 0
+    for batch in tqdm(eval_loader, desc=f"Evaluating {split} set"):
         with torch.no_grad():
-            # Move batch to device
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            outputs = model.model(input_values=batch["input_values"], attention_mask=batch.get("attention_mask"))
+            if isinstance(processor, WhisperProcessor):
+                generated_ids = model.model.whisper.generate(
+                    input_features=batch["input_values"],
+                    max_length=225
+                )
+                pred_strings = processor.batch_decode(generated_ids, skip_special_tokens=True)
+                
+                label_strings = processor.batch_decode(batch["labels"], skip_special_tokens=True)
+            else:
+                logits = outputs.logits
+                predicted_ids = torch.argmax(logits, dim=-1)
+                pred_strings = processor["tokenizer"].batch_decode(predicted_ids)
+                
+                labels = batch["labels"].detach().cpu().numpy()
+                labels = np.where(labels != -100, labels, processor["tokenizer"].pad_token_id)
+                label_strings = processor["tokenizer"].batch_decode(labels)
             
-            # Get predictions
-            outputs = model.model(
-                input_values=batch["input_values"],
-                attention_mask=batch.get("attention_mask", None)
-            )
-            
-            # Get predicted tokens
-            predicted_ids = torch.argmax(outputs.logits, dim=-1)
-            
-            # Decode predictions
-            pred_strings = processor.batch_decode(predicted_ids)
-            
-            # Decode labels
-            labels = batch["labels"].detach().cpu().numpy()
-            import numpy as np
-            labels = np.where(labels != -100, labels, processor.tokenizer.pad_token_id)
-            label_strings = processor.batch_decode(labels)
-            
-            # Calculate dialect accuracy
             for pred, label in zip(pred_strings, label_strings):
                 pred_dialect = extract_dialect(pred)
                 label_dialect = extract_dialect(label)
@@ -115,12 +84,10 @@ def main():
                     if pred_dialect == label_dialect:
                         dialect_correct += 1
                     
-                    # Print examples
                     print(f"\nTrue: '{label}'")
                     print(f"Pred: '{pred}'")
                     print(f"Dialect correct: {pred_dialect == label_dialect} (True: {label_dialect}, Pred: {pred_dialect or 'None'})")
                     
-                    # Calculate WER for this sample
                     import jiwer
                     pred_text = re.sub(r'<[^>]+>\s*', '', pred)
                     label_text = re.sub(r'<[^>]+>\s*', '', label)
@@ -128,25 +95,21 @@ def main():
                     wer_total += wer
                     print(f"WER: {wer:.4f}")
                     
-                    # Print separator
                     print("-" * 80)
     
-    # Print summary
     dialect_accuracy = dialect_correct / total if total > 0 else 0
     avg_wer = wer_total / total if total > 0 else 0
     
     print(f"\n{'=' * 40} SUMMARY {'=' * 40}")
-    print(f"Evaluated {total} samples from {args.split} set")
+    print(f"Evaluated {total} samples from {split} set")
     print(f"Dialect Accuracy: {dialect_accuracy:.4f} ({dialect_correct}/{total})")
     print(f"Average WER: {avg_wer:.4f}")
 
 def collate_fn(batch):
     """Collate function for variable length inputs."""
-    # Get input values and labels
     input_values = [item["input_values"] for item in batch]
     labels = [item["labels"] for item in batch]
     
-    # Pad input values and create attention mask
     input_lengths = [len(x) for x in input_values]
     max_input_length = max(input_lengths)
     
@@ -154,7 +117,6 @@ def collate_fn(batch):
     attention_mask = []
     
     for item, length in zip(input_values, input_lengths):
-        # Pad input values
         padded = torch.nn.functional.pad(
             item, 
             (0, max_input_length - length), 
@@ -163,7 +125,6 @@ def collate_fn(batch):
         )
         padded_input_values.append(padded)
         
-        # Create attention mask
         mask = torch.ones(length)
         mask = torch.nn.functional.pad(
             mask, 
@@ -173,18 +134,15 @@ def collate_fn(batch):
         )
         attention_mask.append(mask)
     
-    # Stack tensors
     input_values = torch.stack(padded_input_values)
     attention_mask = torch.stack(attention_mask)
     
-    # Pad labels
     label_lengths = [len(x) for x in labels]
     max_label_length = max(label_lengths)
     
     padded_labels = []
     
     for item, length in zip(labels, label_lengths):
-        # Pad labels
         padded = torch.nn.functional.pad(
             item, 
             (0, max_label_length - length), 
@@ -202,4 +160,10 @@ def collate_fn(batch):
     }
 
 if __name__ == "__main__":
-    main() 
+    parser = argparse.ArgumentParser(description='Check dialect accuracy of a trained ASR model')
+    parser.add_argument('--checkpoint', type=str, required=True)
+    parser.add_argument('--num_samples', type=int, default=100)
+    parser.add_argument('--split', type=str, default='validation', choices=['test','validation'])
+    args = parser.parse_args()
+    config, cache_config = get_config('transcription')
+    evaluate_dialect_accuracy(config, cache_config, args.checkpoint, args.num_samples, args.split)
